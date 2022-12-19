@@ -20,7 +20,7 @@ require (
 	github.com/kardianos/service v1.2.2
 	github.com/lucas-clemente/quic-go v0.29.2
 	github.com/mdlayher/ethernet v0.0.0-20220221185849-529eae5b6118
-	github.com/mdlayher/netlink v1.6.2
+	github.com/mdlayher/netlink v1.7.1
 	// TODO(a.garipov): This package is deprecated; find a new one or use
 	// our own code for that.  Perhaps, use gopacket.
 	github.com/mdlayher/raw v0.1.0
@@ -30,7 +30,7 @@ require (
 	go.etcd.io/bbolt v1.3.6
 	golang.org/x/crypto v0.1.0
 	golang.org/x/exp v0.0.0-20221106115401-f9659909a136
-	golang.org/x/net v0.1.0
+	golang.org/x/net v0.2.0
 	golang.org/x/sys v0.2.0
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -52,7 +52,7 @@ require (
 	github.com/marten-seemann/qtls-go1-18 v0.1.3 // indirect
 	github.com/marten-seemann/qtls-go1-19 v0.1.1 // indirect
 	github.com/mdlayher/packet v1.0.0 // indirect
-	github.com/mdlayher/socket v0.2.3 // indirect
+	github.com/mdlayher/socket v0.4.0 // indirect
 	github.com/nxadm/tail v1.4.8 // indirect
 	github.com/onsi/ginkgo v1.16.5 // indirect
 	github.com/onsi/ginkgo/v2 v2.5.0 // indirect
