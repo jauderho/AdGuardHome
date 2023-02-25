@@ -28,6 +28,12 @@ export default {
             "homepage": "https://badmojr.github.io/1Hosts/",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_24.txt"
         },
+        "1hosts_mini": {
+            "name": "1Hosts (mini)",
+            "categoryId": "general",
+            "homepage": "https://badmojr.github.io/1Hosts/",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_38.txt"
+        },
         "CHN_adrules": {
             "name": "CHN: AdRules DNS List",
             "categoryId": "regional",
@@ -39,6 +45,12 @@ export default {
             "categoryId": "regional",
             "homepage": "https://anti-ad.net/",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_21.txt"
+        },
+        "HUN_hufilter": {
+            "name": "HUN: Hufilter",
+            "categoryId": "regional",
+            "homepage": "https://github.com/hufilter/hufilter",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_35.txt"
         },
         "IDN_abpindo": {
             "name": "IDN: ABPindo",
@@ -70,6 +82,12 @@ export default {
             "homepage": "https://github.com/yous/YousList",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_15.txt"
         },
+        "LIT_easylist_lithuania": {
+            "name": "LIT: EasyList Lithuania",
+            "categoryId": "regional",
+            "homepage": "https://github.com/EasyList-Lithuania/easylist_lithuania",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_36.txt"
+        },
         "MKD_macedonian_pi_hole_blocklist": {
             "name": "MKD: Macedonian Pi-hole Blocklist",
             "categoryId": "regional",
@@ -83,7 +101,7 @@ export default {
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_13.txt"
         },
         "POL_polish_filters_for_pi_hole": {
-            "name": "POL: Polish filters for Pi hole",
+            "name": "POL: Polish filters for Pi-hole",
             "categoryId": "regional",
             "homepage": "https://www.certyficate.it/",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_14.txt"
@@ -142,11 +160,17 @@ export default {
             "homepage": "https://github.com/DandelionSprout/adfilt",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_6.txt"
         },
-        "energized_spark": {
-            "name": "Energized Spark",
+        "hagezi_personal": {
+            "name": "HaGeZi Personal Black \u0026 White",
             "categoryId": "general",
-            "homepage": "https://energized.pro/",
-            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_28.txt"
+            "homepage": "https://github.com/hagezi/dns-blocklists",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_34.txt"
+        },
+        "no_google": {
+            "name": "No Google",
+            "categoryId": "other",
+            "homepage": "https://github.com/nickspaargaren/no-google",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_37.txt"
         },
         "nocoin_filter_list": {
             "name": "NoCoin Filter List",

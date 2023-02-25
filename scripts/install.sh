@@ -33,6 +33,19 @@ usage() {
 	exit 2
 }
 
+# Function maybe_sudo runs passed command with root privileges if use_sudo isn't
+# equal to 0.
+#
+# TODO(e.burkov):  Use everywhere the sudo_cmd isn't quoted.
+maybe_sudo() {
+	if [ "$use_sudo" -eq 0 ]
+	then
+		"$@"
+	else
+		"$sudo_cmd" "$@"
+	fi
+}
+
 # Function is_command checks if the command exists on the machine.
 is_command() {
 	command -v "$1" >/dev/null 2>&1
@@ -338,6 +351,18 @@ download_wget() {
 	wget --no-verbose -O "$wget_output" "$1"
 }
 
+# download_fetch uses fetch(1) to download a file.  The first argument is the
+# URL.  The second argument is optional and is the output file.
+download_fetch() {
+	fetch_output="${2:-}"
+	if [ "$fetch_output" = '' ]
+	then
+		fetch -o '-' "$1"
+	else
+		fetch -o "$fetch_output" "$1"
+	fi
+}
+
 # Function set_download_func sets the appropriate function for downloading
 # files.
 set_download_func() {
@@ -348,6 +373,9 @@ set_download_func() {
 	elif is_command 'wget'
 	then
 		download_func='download_wget'
+	elif is_command 'fetch'
+	then
+		download_func='download_fetch'
 	else
 		error_exit "either curl or wget is required to install AdGuard Home via this script"
 	fi
@@ -539,7 +567,14 @@ handle_existing() {
 
 # Function install_service tries to install AGH as service.
 install_service() {
-	if ( cd "$agh_dir" && ./AdGuardHome -s install )
+	# Installing the service as root is required at least on FreeBSD.
+	use_sudo='0'
+	if [ "$os" = 'freebsd' ]
+	then
+		use_sudo='1'
+	fi
+
+	if ( cd "$agh_dir" && maybe_sudo ./AdGuardHome -s install )
 	then
 		return 0
 	fi

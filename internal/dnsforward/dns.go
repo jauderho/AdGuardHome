@@ -10,6 +10,8 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/dnsproxy/proxy"
+	"github.com/AdguardTeam/dnsproxy/upstream"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/AdguardTeam/golibs/stringutil"
@@ -17,6 +19,9 @@ import (
 )
 
 // To transfer information between modules
+//
+// TODO(s.chzhen):  Add lowercased, non-FQDN version of the hostname from the
+// question of the request.
 type dnsContext struct {
 	proxyCtx *proxy.DNSContext
 
@@ -28,9 +33,10 @@ type dnsContext struct {
 	// response is modified by filters.
 	origResp *dns.Msg
 
-	// unreversedReqIP stores an IP address obtained from PTR request if it
-	// parsed successfully and belongs to one of locally-served IP ranges as per
-	// RFC 6303.
+	// unreversedReqIP stores an IP address obtained from a PTR request if it
+	// was parsed successfully and belongs to one of the locally served IP
+	// ranges.  It is also filled with unmapped version of the address if it's
+	// within DNS64 prefixes.
 	unreversedReqIP net.IP
 
 	// err is the error returned from a processing function.
@@ -57,7 +63,7 @@ type dnsContext struct {
 	// responseAD shows if the response had the AD bit set.
 	responseAD bool
 
-	// isLocalClient shows if client's IP address is from locally-served
+	// isLocalClient shows if client's IP address is from locally served
 	// network.
 	isLocalClient bool
 }
@@ -133,8 +139,8 @@ func (s *Server) handleDNSRequest(_ *proxy.Proxy, pctx *proxy.DNSContext) error 
 	return nil
 }
 
-// processRecursion checks the incoming request and halts it's handling if s
-// have tried to resolve it recently.
+// processRecursion checks the incoming request and halts its handling by
+// answering NXDOMAIN if s has tried to resolve it recently.
 func (s *Server) processRecursion(dctx *dnsContext) (rc resultCode) {
 	pctx := dctx.proxyCtx
 
@@ -224,7 +230,7 @@ func (s *Server) onDHCPLeaseChanged(flags int) {
 	for _, l := range ll {
 		// TODO(a.garipov): Remove this after we're finished with the client
 		// hostname validations in the DHCP server code.
-		err := netutil.ValidateDomainName(l.Hostname)
+		err := netutil.ValidateHostname(l.Hostname)
 		if err != nil {
 			log.Debug("dnsforward: skipping invalid hostname %q from dhcp: %s", l.Hostname, err)
 
@@ -349,8 +355,8 @@ func (s *Server) makeDDRResponse(req *dns.Msg) (resp *dns.Msg) {
 	return resp
 }
 
-// processDetermineLocal determines if the client's IP address is from
-// locally-served network and saves the result into the context.
+// processDetermineLocal determines if the client's IP address is from locally
+// served network and saves the result into the context.
 func (s *Server) processDetermineLocal(dctx *dnsContext) (rc resultCode) {
 	rc = resultCodeSuccess
 
@@ -377,7 +383,8 @@ func (s *Server) dhcpHostToIP(host string) (ip netip.Addr, ok bool) {
 }
 
 // processDHCPHosts respond to A requests if the target hostname is known to
-// the server.
+// the server.  It responds with a mapped IP address if the DNS64 is enabled and
+// the request is for AAAA.
 //
 // TODO(a.garipov): Adapt to AAAA as well.
 func (s *Server) processDHCPHosts(dctx *dnsContext) (rc resultCode) {
@@ -409,20 +416,34 @@ func (s *Server) processDHCPHosts(dctx *dnsContext) (rc resultCode) {
 	log.Debug("dnsforward: dhcp record for %q is %s", reqHost, ip)
 
 	resp := s.makeResponse(req)
-	if q.Qtype == dns.TypeA {
+	switch q.Qtype {
+	case dns.TypeA:
 		a := &dns.A{
 			Hdr: s.hdr(req, dns.TypeA),
 			A:   ip.AsSlice(),
 		}
 		resp.Answer = append(resp.Answer, a)
+	case dns.TypeAAAA:
+		if s.dns64Pref != (netip.Prefix{}) {
+			// Respond with DNS64-mapped address for IPv4 host if DNS64 is
+			// enabled.
+			aaaa := &dns.AAAA{
+				Hdr:  s.hdr(req, dns.TypeAAAA),
+				AAAA: s.mapDNS64(ip),
+			}
+			resp.Answer = append(resp.Answer, aaaa)
+		}
+	default:
+		// Go on.
 	}
+
 	dctx.proxyCtx.Res = resp
 
 	return resultCodeSuccess
 }
 
 // processRestrictLocal responds with NXDOMAIN to PTR requests for IP addresses
-// in locally-served network from external clients.
+// in locally served network from external clients.
 func (s *Server) processRestrictLocal(dctx *dnsContext) (rc resultCode) {
 	pctx := dctx.proxyCtx
 	req := pctx.Req
@@ -447,19 +468,19 @@ func (s *Server) processRestrictLocal(dctx *dnsContext) (rc resultCode) {
 			return resultCodeError
 		}
 
-		log.Debug("dnsforward: request is for a service domain")
+		log.Debug("dnsforward: request is not for arpa domain")
 
 		return resultCodeSuccess
 	}
 
 	// Restrict an access to local addresses for external clients.  We also
-	// assume that all the DHCP leases we give are locally-served or at least
-	// don't need to be accessible externally.
+	// assume that all the DHCP leases we give are locally served or at least
+	// shouldn't be accessible externally.
 	if !s.privateNets.Contains(ip) {
-		log.Debug("dnsforward: addr %s is not from locally-served network", ip)
-
 		return resultCodeSuccess
 	}
+
+	log.Debug("dnsforward: addr %s is from locally served network", ip)
 
 	if !dctx.isLocalClient {
 		log.Debug("dnsforward: %q requests an internal ip", pctx.Addr)
@@ -473,7 +494,7 @@ func (s *Server) processRestrictLocal(dctx *dnsContext) (rc resultCode) {
 	dctx.unreversedReqIP = ip
 
 	// There is no need to filter request from external addresses since this
-	// code is only executed when the request is for locally-served ARPA
+	// code is only executed when the request is for locally served ARPA
 	// hostname so disable redundant filters.
 	dctx.setts.ParentalEnabled = false
 	dctx.setts.SafeBrowsingEnabled = false
@@ -508,7 +529,7 @@ func (s *Server) processDHCPAddrs(dctx *dnsContext) (rc resultCode) {
 		return resultCodeSuccess
 	}
 
-	// TODO(a.garipov):  Remove once we switch to netip.Addr more fully.
+	// TODO(a.garipov):  Remove once we switch to [netip.Addr] more fully.
 	ipAddr, err := netutil.IPToAddrNoMapped(ip)
 	if err != nil {
 		log.Debug("dnsforward: bad reverse ip %v from dhcp: %s", ip, err)
@@ -555,10 +576,6 @@ func (s *Server) processLocalPTR(dctx *dnsContext) (rc resultCode) {
 
 	s.serverLock.RLock()
 	defer s.serverLock.RUnlock()
-
-	if !s.privateNets.Contains(ip) {
-		return resultCodeSuccess
-	}
 
 	if s.conf.UsePrivateRDNS {
 		s.recDetector.add(*pctx.Req)
@@ -634,14 +651,7 @@ func (s *Server) processUpstream(dctx *dnsContext) (rc resultCode) {
 
 	s.setCustomUpstream(pctx, dctx.clientID)
 
-	origReqAD := false
-	if s.conf.EnableDNSSEC {
-		if req.AuthenticatedData {
-			origReqAD = true
-		} else {
-			req.AuthenticatedData = true
-		}
-	}
+	reqWantsDNSSEC := s.setReqAD(req)
 
 	// Process the request further since it wasn't filtered.
 	prx := s.proxy()
@@ -651,19 +661,73 @@ func (s *Server) processUpstream(dctx *dnsContext) (rc resultCode) {
 		return resultCodeError
 	}
 
-	if dctx.err = prx.Resolve(pctx); dctx.err != nil {
+	if err := prx.Resolve(pctx); err != nil {
+		if errors.Is(err, upstream.ErrNoUpstreams) {
+			// Do not even put into querylog.  Currently this happens either
+			// when the private resolvers enabled and the request is DNS64 PTR,
+			// or when the client isn't considered local by prx.
+			//
+			// TODO(e.burkov):  Make proxy detect local client the same way as
+			// AGH does.
+			pctx.Res = s.genNXDomain(req)
+
+			return resultCodeFinish
+		}
+
+		dctx.err = err
+
 		return resultCodeError
 	}
 
 	dctx.responseFromUpstream = true
 	dctx.responseAD = pctx.Res.AuthenticatedData
 
-	if s.conf.EnableDNSSEC && !origReqAD {
+	s.setRespAD(pctx, reqWantsDNSSEC)
+
+	return resultCodeSuccess
+}
+
+// setReqAD changes the request based on the server settings.  wantsDNSSEC is
+// false if the response should be cleared of the AD bit.
+//
+// TODO(a.garipov, e.burkov): This should probably be done in module dnsproxy.
+func (s *Server) setReqAD(req *dns.Msg) (wantsDNSSEC bool) {
+	if !s.conf.EnableDNSSEC {
+		return false
+	}
+
+	origReqAD := req.AuthenticatedData
+	req.AuthenticatedData = true
+
+	// Per [RFC 6840] says, validating resolvers should only set the AD bit when
+	// the response has the AD bit set and the request contained either a set DO
+	// bit or a set AD bit.  So, if neither of these is true, clear the AD bits
+	// in [Server.setRespAD].
+	//
+	// [RFC 6840]: https://datatracker.ietf.org/doc/html/rfc6840#section-5.8
+	return origReqAD || hasDO(req)
+}
+
+// hasDO returns true if msg has EDNS(0) options and the DNSSEC OK flag is set
+// in there.
+//
+// TODO(a.garipov): Move to golibs/dnsmsg when it's there.
+func hasDO(msg *dns.Msg) (do bool) {
+	o := msg.IsEdns0()
+	if o == nil {
+		return false
+	}
+
+	return o.Do()
+}
+
+// setRespAD changes the request and response based on the server settings and
+// the original request data.
+func (s *Server) setRespAD(pctx *proxy.DNSContext, reqWantsDNSSEC bool) {
+	if s.conf.EnableDNSSEC && !reqWantsDNSSEC {
 		pctx.Req.AuthenticatedData = false
 		pctx.Res.AuthenticatedData = false
 	}
-
-	return resultCodeSuccess
 }
 
 // isDHCPClientHostQ returns true if q is from a request for a DHCP client

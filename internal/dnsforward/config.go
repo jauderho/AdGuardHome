@@ -5,8 +5,8 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +22,7 @@ import (
 	"github.com/AdguardTeam/golibs/stringutil"
 	"github.com/AdguardTeam/golibs/timeutil"
 	"github.com/ameshkov/dnscrypt/v2"
+	"golang.org/x/exp/slices"
 )
 
 // BlockingMode is an enum of all allowed blocking modes.
@@ -224,12 +225,18 @@ type ServerConfig struct {
 	// resolving PTR queries for local addresses.
 	LocalPTRResolvers []string
 
+	// DNS64Prefixes is a slice of NAT64 prefixes to be used for DNS64.
+	DNS64Prefixes []netip.Prefix
+
 	// ResolveClients signals if the RDNS should resolve clients' addresses.
 	ResolveClients bool
 
 	// UsePrivateRDNS defines if the PTR requests for unknown addresses from
 	// locally-served networks should be resolved via private PTR resolvers.
 	UsePrivateRDNS bool
+
+	// UseDNS64 defines if DNS64 is enabled for incoming requests.
+	UseDNS64 bool
 
 	// ServeHTTP3 defines if HTTP/3 is be allowed for incoming requests.
 	ServeHTTP3 bool
@@ -265,6 +272,8 @@ func (s *Server) createProxyConfig() (conf proxy.Config, err error) {
 		RequestHandler:         s.handleDNSRequest,
 		EnableEDNSClientSubnet: srvConf.EnableEDNSClientSubnet,
 		MaxGoroutines:          int(srvConf.MaxGoroutines),
+		UseDNS64:               srvConf.UseDNS64,
+		DNS64Prefs:             srvConf.DNS64Prefixes,
 	}
 
 	if srvConf.CacheSize != 0 {
@@ -501,7 +510,7 @@ func (s *Server) prepareTLS(proxyConfig *proxy.Config) (err error) {
 		if len(cert.DNSNames) != 0 {
 			s.conf.dnsNames = cert.DNSNames
 			log.Debug("dnsforward: using certificate's SAN as DNS names: %v", cert.DNSNames)
-			sort.Strings(s.conf.dnsNames)
+			slices.Sort(s.conf.dnsNames)
 		} else {
 			s.conf.dnsNames = append(s.conf.dnsNames, cert.Subject.CommonName)
 			log.Debug("dnsforward: using certificate's CN as DNS name: %s", cert.Subject.CommonName)
@@ -515,16 +524,6 @@ func (s *Server) prepareTLS(proxyConfig *proxy.Config) (err error) {
 	}
 
 	return nil
-}
-
-// isInSorted returns true if s is in the sorted slice strs.
-func isInSorted(strs []string, s string) (ok bool) {
-	i := sort.SearchStrings(strs, s)
-	if i == len(strs) || strs[i] != s {
-		return false
-	}
-
-	return true
 }
 
 // isWildcard returns true if host is a wildcard hostname.
@@ -541,11 +540,12 @@ func matchesDomainWildcard(host, pat string) (ok bool) {
 // anyNameMatches returns true if sni, the client's SNI value, matches any of
 // the DNS names and patterns from certificate.  dnsNames must be sorted.
 func anyNameMatches(dnsNames []string, sni string) (ok bool) {
-	if netutil.ValidateDomainName(sni) != nil {
+	// Check sni is either a valid hostname or a valid IP address.
+	if netutil.ValidateHostname(sni) != nil && net.ParseIP(sni) == nil {
 		return false
 	}
 
-	if isInSorted(dnsNames, sni) {
+	if _, ok = slices.BinarySearch(dnsNames, sni); ok {
 		return true
 	}
 

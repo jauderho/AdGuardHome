@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -67,15 +66,18 @@ func (c *Client) closeUpstreams() (err error) {
 
 type clientSource uint
 
-// Client sources.  The order determines the priority.
+// Clients information sources.  The order determines the priority.
 const (
-	ClientSourceWHOIS clientSource = iota
+	ClientSourceNone clientSource = iota
+	ClientSourceWHOIS
 	ClientSourceARP
 	ClientSourceRDNS
 	ClientSourceDHCP
 	ClientSourceHostsFile
+	ClientSourcePersistent
 )
 
+// type check
 var _ fmt.Stringer = clientSource(0)
 
 // String returns a human-readable name of cs.
@@ -96,6 +98,7 @@ func (cs clientSource) String() (s string) {
 	}
 }
 
+// type check
 var _ encoding.TextMarshaler = clientSource(0)
 
 // MarshalText implements encoding.TextMarshaler for the clientSource.
@@ -267,7 +270,7 @@ func (clients *clientsContainer) addFromConfig(objects []*clientObject) {
 			}
 		}
 
-		sort.Strings(cli.Tags)
+		slices.Sort(cli.Tags)
 
 		_, err := clients.Add(cli)
 		if err != nil {
@@ -307,7 +310,9 @@ func (clients *clientsContainer) forConfig() (objs []*clientObject) {
 	// above loop can generate different orderings when writing to the config
 	// file: this produces lots of diffs in config files, so sort objects by
 	// name before writing.
-	sort.Slice(objs, func(i, j int) bool { return objs[i].Name < objs[j].Name })
+	slices.SortStableFunc(objs, func(a, b *clientObject) (sortsBefore bool) {
+		return a.Name < b.Name
+	})
 
 	return objs
 }
@@ -332,23 +337,24 @@ func (clients *clientsContainer) onDHCPLeaseChanged(flags int) {
 	}
 }
 
-// exists checks if client with this IP address already exists.
-func (clients *clientsContainer) exists(ip netip.Addr, source clientSource) (ok bool) {
+// clientSource checks if client with this IP address already exists and returns
+// the source which updated it last.  It returns [ClientSourceNone] if the
+// client doesn't exist.
+func (clients *clientsContainer) clientSource(ip netip.Addr) (src clientSource) {
 	clients.lock.Lock()
 	defer clients.lock.Unlock()
 
-	_, ok = clients.findLocked(ip.String())
+	_, ok := clients.findLocked(ip.String())
 	if ok {
-		return true
+		return ClientSourcePersistent
 	}
 
 	rc, ok := clients.ipToRC[ip]
 	if !ok {
-		return false
+		return ClientSourceNone
 	}
 
-	// Return false if the new source has higher priority.
-	return source <= rc.Source
+	return rc.Source
 }
 
 func toQueryLogWHOIS(wi *RuntimeClientWHOISInfo) (cw *querylog.ClientWHOIS) {
@@ -585,7 +591,7 @@ func (clients *clientsContainer) check(c *Client) (err error) {
 		}
 	}
 
-	sort.Strings(c.Tags)
+	slices.Sort(c.Tags)
 
 	err = dnsforward.ValidateUpstreams(c.Upstreams)
 	if err != nil {

@@ -1,23 +1,17 @@
-// DNS Rewrites
-
 package filtering
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
-	"sort"
 	"strings"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/aghhttp"
 	"github.com/AdguardTeam/golibs/errors"
-	"github.com/AdguardTeam/golibs/log"
+	"github.com/AdguardTeam/golibs/mathutil"
 	"github.com/miekg/dns"
 	"golang.org/x/exp/slices"
 )
 
-// TODO(d.kolyshev): Rename this file to rewritehttp.go.
+// Legacy DNS rewrites
 
 // LegacyRewrite is a single legacy DNS rewrite record.
 //
@@ -128,38 +122,24 @@ func matchDomainWildcard(host, wildcard string) (ok bool) {
 	return isWildcard(wildcard) && strings.HasSuffix(host, wildcard[1:])
 }
 
-// rewritesSorted is a slice of legacy rewrites for sorting.
+// legacyRewriteSortsBefore sorts rewirtes according to the following priority:
 //
-// The sorting priority:
-//
-//  1. A and AAAA > CNAME
-//  2. wildcard > exact
-//  3. lower level wildcard > higher level wildcard
-//
-// TODO(a.garipov):  Replace with slices.Sort.
-type rewritesSorted []*LegacyRewrite
-
-// Len implements the sort.Interface interface for rewritesSorted.
-func (a rewritesSorted) Len() (l int) { return len(a) }
-
-// Swap implements the sort.Interface interface for rewritesSorted.
-func (a rewritesSorted) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
-
-// Less implements the sort.Interface interface for rewritesSorted.
-func (a rewritesSorted) Less(i, j int) (less bool) {
-	ith, jth := a[i], a[j]
-	if ith.Type == dns.TypeCNAME && jth.Type != dns.TypeCNAME {
+//  1. A and AAAA > CNAME;
+//  2. wildcard > exact;
+//  3. lower level wildcard > higher level wildcard;
+func legacyRewriteSortsBefore(a, b *LegacyRewrite) (sortsBefore bool) {
+	if a.Type == dns.TypeCNAME && b.Type != dns.TypeCNAME {
 		return true
-	} else if ith.Type != dns.TypeCNAME && jth.Type == dns.TypeCNAME {
+	} else if a.Type != dns.TypeCNAME && b.Type == dns.TypeCNAME {
 		return false
 	}
 
-	if iw, jw := isWildcard(ith.Domain), isWildcard(jth.Domain); iw != jw {
-		return jw
+	if aIsWld, bIsWld := isWildcard(a.Domain), isWildcard(b.Domain); aIsWld != bIsWld {
+		return bIsWld
 	}
 
-	// Both are either wildcards or not.
-	return len(ith.Domain) > len(jth.Domain)
+	// Both are either wildcards or both aren't.
+	return len(a.Domain) > len(b.Domain)
 }
 
 // prepareRewrites normalizes and validates all legacy DNS rewrites.
@@ -201,108 +181,17 @@ func findRewrites(
 		return nil, matched
 	}
 
-	sort.Sort(rewritesSorted(rewrites))
+	slices.SortFunc(rewrites, legacyRewriteSortsBefore)
 
 	for i, r := range rewrites {
 		if isWildcard(r.Domain) {
 			// Don't use rewrites[:0], because we need to return at least one
 			// item here.
-			rewrites = rewrites[:max(1, i)]
+			rewrites = rewrites[:mathutil.Max(1, i)]
 
 			break
 		}
 	}
 
 	return rewrites, matched
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-
-	return b
-}
-
-type rewriteEntryJSON struct {
-	Domain string `json:"domain"`
-	Answer string `json:"answer"`
-}
-
-func (d *DNSFilter) handleRewriteList(w http.ResponseWriter, r *http.Request) {
-	arr := []*rewriteEntryJSON{}
-
-	d.confLock.Lock()
-	for _, ent := range d.Config.Rewrites {
-		jsent := rewriteEntryJSON{
-			Domain: ent.Domain,
-			Answer: ent.Answer,
-		}
-		arr = append(arr, &jsent)
-	}
-	d.confLock.Unlock()
-
-	_ = aghhttp.WriteJSONResponse(w, r, arr)
-}
-
-func (d *DNSFilter) handleRewriteAdd(w http.ResponseWriter, r *http.Request) {
-	rwJSON := rewriteEntryJSON{}
-	err := json.NewDecoder(r.Body).Decode(&rwJSON)
-	if err != nil {
-		aghhttp.Error(r, w, http.StatusBadRequest, "json.Decode: %s", err)
-
-		return
-	}
-
-	rw := &LegacyRewrite{
-		Domain: rwJSON.Domain,
-		Answer: rwJSON.Answer,
-	}
-
-	err = rw.normalize()
-	if err != nil {
-		// Shouldn't happen currently, since normalize only returns a non-nil
-		// error when a rewrite is nil, but be change-proof.
-		aghhttp.Error(r, w, http.StatusBadRequest, "normalizing: %s", err)
-
-		return
-	}
-
-	d.confLock.Lock()
-	d.Config.Rewrites = append(d.Config.Rewrites, rw)
-	d.confLock.Unlock()
-	log.Debug("rewrite: added element: %s -> %s [%d]", rw.Domain, rw.Answer, len(d.Config.Rewrites))
-
-	d.Config.ConfigModified()
-}
-
-func (d *DNSFilter) handleRewriteDelete(w http.ResponseWriter, r *http.Request) {
-	jsent := rewriteEntryJSON{}
-	err := json.NewDecoder(r.Body).Decode(&jsent)
-	if err != nil {
-		aghhttp.Error(r, w, http.StatusBadRequest, "json.Decode: %s", err)
-
-		return
-	}
-
-	entDel := &LegacyRewrite{
-		Domain: jsent.Domain,
-		Answer: jsent.Answer,
-	}
-	arr := []*LegacyRewrite{}
-
-	d.confLock.Lock()
-	for _, ent := range d.Config.Rewrites {
-		if ent.equal(entDel) {
-			log.Debug("rewrite: removed element: %s -> %s", ent.Domain, ent.Answer)
-
-			continue
-		}
-
-		arr = append(arr, ent)
-	}
-	d.Config.Rewrites = arr
-	d.confLock.Unlock()
-
-	d.Config.ConfigModified()
 }

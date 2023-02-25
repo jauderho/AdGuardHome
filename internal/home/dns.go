@@ -7,9 +7,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghalg"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghhttp"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
+	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
 	"github.com/AdguardTeam/AdGuardHome/internal/dnsforward"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
@@ -18,6 +21,7 @@ import (
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/netutil"
+	"github.com/AdguardTeam/golibs/stringutil"
 	"github.com/ameshkov/dnscrypt/v2"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -39,24 +43,28 @@ func onConfigModified() {
 	}
 }
 
-// initDNSServer creates an instance of the dnsforward.Server
-// Please note that we must do it even if we don't start it
-// so that we had access to the query log and the stats
-func initDNSServer() (err error) {
+// initDNS updates all the fields of the [Context] needed to initialize the DNS
+// server and initializes it at last.  It also must not be called unless
+// [config] and [Context] are initialized.
+func initDNS() (err error) {
 	baseDir := Context.getDataDir()
 
-	var anonFunc aghnet.IPMutFunc
-	if config.DNS.AnonymizeClientIP {
-		anonFunc = querylog.AnonymizeIP
-	}
-	anonymizer := aghnet.NewIPMut(anonFunc)
+	anonymizer := config.anonymizer()
 
 	statsConf := stats.Config{
 		Filename:       filepath.Join(baseDir, "stats.db"),
-		LimitDays:      config.DNS.StatsInterval,
+		LimitDays:      config.Stats.Interval,
 		ConfigModified: onConfigModified,
 		HTTPRegister:   httpRegister,
+		Enabled:        config.Stats.Enabled,
 	}
+
+	set, err := nonDupEmptyHostNames(config.Stats.Ignored)
+	if err != nil {
+		return fmt.Errorf("statistics: ignored list: %w", err)
+	}
+
+	statsConf.Ignored = set
 	Context.stats, err = stats.New(statsConf)
 	if err != nil {
 		return fmt.Errorf("init stats: %w", err)
@@ -68,12 +76,19 @@ func initDNSServer() (err error) {
 		HTTPRegister:      httpRegister,
 		FindClient:        Context.clients.findMultiple,
 		BaseDir:           baseDir,
-		RotationIvl:       config.DNS.QueryLogInterval.Duration,
-		MemSize:           config.DNS.QueryLogMemSize,
-		Enabled:           config.DNS.QueryLogEnabled,
-		FileEnabled:       config.DNS.QueryLogFileEnabled,
 		AnonymizeClientIP: config.DNS.AnonymizeClientIP,
+		RotationIvl:       config.QueryLog.Interval.Duration,
+		MemSize:           config.QueryLog.MemSize,
+		Enabled:           config.QueryLog.Enabled,
+		FileEnabled:       config.QueryLog.FileEnabled,
 	}
+
+	set, err = nonDupEmptyHostNames(config.QueryLog.Ignored)
+	if err != nil {
+		return fmt.Errorf("querylog: ignored list: %w", err)
+	}
+
+	conf.Ignored = set
 	Context.queryLog = querylog.New(conf)
 
 	Context.filters, err = filtering.New(config.DNS.DnsfilterConf, nil)
@@ -82,34 +97,46 @@ func initDNSServer() (err error) {
 		return err
 	}
 
-	var privateNets netutil.SubnetSet
-	switch len(config.DNS.PrivateNets) {
-	case 0:
-		// Use an optimized locally-served matcher.
-		privateNets = netutil.SubnetSetFunc(netutil.IsLocallyServed)
-	case 1:
-		privateNets, err = netutil.ParseSubnet(config.DNS.PrivateNets[0])
-		if err != nil {
-			return fmt.Errorf("preparing the set of private subnets: %w", err)
-		}
-	default:
-		var nets []*net.IPNet
-		nets, err = netutil.ParseSubnets(config.DNS.PrivateNets...)
-		if err != nil {
-			return fmt.Errorf("preparing the set of private subnets: %w", err)
-		}
+	tlsConf := &tlsConfigSettings{}
+	Context.tls.WriteDiskConfig(tlsConf)
 
-		privateNets = netutil.SliceSubnetSet(nets)
+	return initDNSServer(
+		Context.filters,
+		Context.stats,
+		Context.queryLog,
+		Context.dhcpServer,
+		anonymizer,
+		httpRegister,
+		tlsConf,
+	)
+}
+
+// initDNSServer initializes the [context.dnsServer].  To only use the internal
+// proxy, none of the arguments are required, but tlsConf still must not be nil,
+// in other cases all the arguments also must not be nil.  It also must not be
+// called unless [config] and [Context] are initialized.
+func initDNSServer(
+	filters *filtering.DNSFilter,
+	sts stats.Interface,
+	qlog querylog.QueryLog,
+	dhcpSrv dhcpd.Interface,
+	anonymizer *aghnet.IPMut,
+	httpReg aghhttp.RegisterFunc,
+	tlsConf *tlsConfigSettings,
+) (err error) {
+	privateNets, err := parseSubnetSet(config.DNS.PrivateNets)
+	if err != nil {
+		return fmt.Errorf("preparing set of private subnets: %w", err)
 	}
 
 	p := dnsforward.DNSCreateParams{
-		DNSFilter:   Context.filters,
-		Stats:       Context.stats,
-		QueryLog:    Context.queryLog,
+		DNSFilter:   filters,
+		Stats:       sts,
+		QueryLog:    qlog,
 		PrivateNets: privateNets,
 		Anonymizer:  anonymizer,
 		LocalDomain: config.DHCP.LocalDomainName,
-		DHCPServer:  Context.dhcpServer,
+		DHCPServer:  dhcpSrv,
 	}
 
 	Context.dnsServer, err = dnsforward.NewServer(p)
@@ -120,15 +147,15 @@ func initDNSServer() (err error) {
 	}
 
 	Context.clients.dnsServer = Context.dnsServer
-	var dnsConfig dnsforward.ServerConfig
-	dnsConfig, err = generateServerConfig()
+
+	dnsConf, err := generateServerConfig(tlsConf, httpReg)
 	if err != nil {
 		closeDNSServer()
 
 		return fmt.Errorf("generateServerConfig: %w", err)
 	}
 
-	err = Context.dnsServer.Prepare(&dnsConfig)
+	err = Context.dnsServer.Prepare(&dnsConf)
 	if err != nil {
 		closeDNSServer()
 
@@ -144,6 +171,32 @@ func initDNSServer() (err error) {
 	}
 
 	return nil
+}
+
+// parseSubnetSet parses a slice of subnets.  If the slice is empty, it returns
+// a subnet set that matches all locally served networks, see
+// [netutil.IsLocallyServed].
+func parseSubnetSet(nets []string) (s netutil.SubnetSet, err error) {
+	switch len(nets) {
+	case 0:
+		// Use an optimized function-based matcher.
+		return netutil.SubnetSetFunc(netutil.IsLocallyServed), nil
+	case 1:
+		s, err = netutil.ParseSubnet(nets[0])
+		if err != nil {
+			return nil, err
+		}
+
+		return s, nil
+	default:
+		var nets []*net.IPNet
+		nets, err = netutil.ParseSubnets(config.DNS.PrivateNets...)
+		if err != nil {
+			return nil, err
+		}
+
+		return netutil.SliceSubnetSet(nets), nil
+	}
 }
 
 func isRunning() bool {
@@ -193,7 +246,10 @@ func ipsToUDPAddrs(ips []netip.Addr, port int) (udpAddrs []*net.UDPAddr) {
 	return udpAddrs
 }
 
-func generateServerConfig() (newConf dnsforward.ServerConfig, err error) {
+func generateServerConfig(
+	tlsConf *tlsConfigSettings,
+	httpReg aghhttp.RegisterFunc,
+) (newConf dnsforward.ServerConfig, err error) {
 	dnsConf := config.DNS
 	hosts := aghalg.CoalesceSlice(dnsConf.BindHosts, []netip.Addr{netutil.IPv4Localhost()})
 	newConf = dnsforward.ServerConfig{
@@ -201,12 +257,12 @@ func generateServerConfig() (newConf dnsforward.ServerConfig, err error) {
 		TCPListenAddrs:  ipsToTCPAddrs(hosts, dnsConf.Port),
 		FilteringConfig: dnsConf.FilteringConfig,
 		ConfigModified:  onConfigModified,
-		HTTPRegister:    httpRegister,
+		HTTPRegister:    httpReg,
 		OnDNSRequest:    onDNSRequest,
+		UseDNS64:        config.DNS.UseDNS64,
+		DNS64Prefixes:   config.DNS.DNS64Prefixes,
 	}
 
-	tlsConf := tlsConfigSettings{}
-	Context.tls.WriteDiskConfig(&tlsConf)
 	if tlsConf.Enabled {
 		newConf.TLSConfig = tlsConf.TLSConfig
 		newConf.TLSConfig.ServerName = tlsConf.ServerName
@@ -224,7 +280,7 @@ func generateServerConfig() (newConf dnsforward.ServerConfig, err error) {
 		}
 
 		if tlsConf.PortDNSCrypt != 0 {
-			newConf.DNSCryptConfig, err = newDNSCrypt(hosts, tlsConf)
+			newConf.DNSCryptConfig, err = newDNSCrypt(hosts, *tlsConf)
 			if err != nil {
 				// Don't wrap the error, because it's already
 				// wrapped by newDNSCrypt.
@@ -413,7 +469,11 @@ func startDNSServer() error {
 
 func reconfigureDNSServer() (err error) {
 	var newConf dnsforward.ServerConfig
-	newConf, err = generateServerConfig()
+
+	tlsConf := &tlsConfigSettings{}
+	Context.tls.WriteDiskConfig(tlsConf)
+
+	newConf, err = generateServerConfig(tlsConf, httpRegister)
 	if err != nil {
 		return fmt.Errorf("generating forwarding dns server config: %w", err)
 	}
@@ -471,4 +531,28 @@ func closeDNSServer() {
 	}
 
 	log.Debug("all dns modules are closed")
+}
+
+// nonDupEmptyHostNames returns nil and error, if list has duplicate or empty
+// host name.  Otherwise returns a set, which contains lowercase host names
+// without dot at the end, and nil error.
+func nonDupEmptyHostNames(list []string) (set *stringutil.Set, err error) {
+	set = stringutil.NewSet()
+
+	for _, v := range list {
+		host := strings.ToLower(strings.TrimSuffix(v, "."))
+		// TODO(a.garipov): Think about ignoring empty (".") names in
+		// the future.
+		if host == "" {
+			return nil, errors.Error("host name is empty")
+		}
+
+		if set.Has(host) {
+			return nil, fmt.Errorf("duplicate host name %q", host)
+		}
+
+		set.Add(host)
+	}
+
+	return set, nil
 }

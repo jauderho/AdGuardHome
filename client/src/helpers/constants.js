@@ -53,7 +53,7 @@ export const STATUS_COLORS = {
 export const REPOSITORY = {
     URL: 'https://github.com/AdguardTeam/AdGuardHome',
     TRACKERS_DB:
-        'https://github.com/AdguardTeam/AdGuardHome/tree/master/client/src/helpers/trackers/adguard.json',
+        'https://github.com/AdguardTeam/AdGuardHome/tree/master/client/src/helpers/trackers/trackers.json',
     ISSUES: 'https://github.com/AdguardTeam/AdGuardHome/issues/new/choose',
 };
 
@@ -225,6 +225,14 @@ export const BLOCKING_MODES = {
     nxdomain: 'nxdomain',
     null_ip: 'null_ip',
     custom_ip: 'custom_ip',
+};
+
+// Note that translation strings contain these modes (theme_CONSTANT)
+// i.e. theme_auto, theme_light.
+export const THEMES = {
+    auto: 'auto',
+    dark: 'dark',
+    light: 'light',
 };
 
 export const WHOIS_ICONS = {

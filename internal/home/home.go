@@ -148,13 +148,6 @@ func Main(clientBuildFS fs.FS) {
 func setupContext(opts options) {
 	setupContextFlags(opts)
 
-	switch version.Channel() {
-	case version.ChannelEdge, version.ChannelDevelopment:
-		config.BetaBindPort = 3001
-	default:
-		// Go on.
-	}
-
 	Context.tlsRoots = aghtls.SystemRootCAs()
 	Context.transport = &http.Transport{
 		DialContext: customDialContext,
@@ -339,7 +332,7 @@ func setupConfig(opts options) (err error) {
 
 	if opts.bindPort != 0 {
 		tcpPorts := aghalg.UniqChecker[tcpPort]{}
-		addPorts(tcpPorts, tcpPort(opts.bindPort), tcpPort(config.BetaBindPort))
+		addPorts(tcpPorts, tcpPort(opts.bindPort))
 
 		udpPorts := aghalg.UniqChecker[udpPort]{}
 		addPorts(udpPorts, udpPort(config.DNS.Port))
@@ -376,36 +369,28 @@ func setupConfig(opts options) (err error) {
 }
 
 func initWeb(opts options, clientBuildFS fs.FS) (web *Web, err error) {
-	var clientFS, clientBetaFS fs.FS
+	var clientFS fs.FS
 	if opts.localFrontend {
 		log.Info("warning: using local frontend files")
 
 		clientFS = os.DirFS("build/static")
-		clientBetaFS = os.DirFS("build2/static")
 	} else {
 		clientFS, err = fs.Sub(clientBuildFS, "build/static")
 		if err != nil {
 			return nil, fmt.Errorf("getting embedded client subdir: %w", err)
 		}
-
-		clientBetaFS, err = fs.Sub(clientBuildFS, "build2/static")
-		if err != nil {
-			return nil, fmt.Errorf("getting embedded beta client subdir: %w", err)
-		}
 	}
 
 	webConf := webConfig{
-		firstRun:     Context.firstRun,
-		BindHost:     config.BindHost,
-		BindPort:     config.BindPort,
-		BetaBindPort: config.BetaBindPort,
+		firstRun: Context.firstRun,
+		BindHost: config.BindHost,
+		BindPort: config.BindPort,
 
 		ReadTimeout:       readTimeout,
 		ReadHeaderTimeout: readHdrTimeout,
 		WriteTimeout:      writeTimeout,
 
-		clientFS:     clientFS,
-		clientBetaFS: clientBetaFS,
+		clientFS: clientFS,
 
 		serveHTTP3: config.DNS.ServeHTTP3,
 	}
@@ -454,6 +439,10 @@ func run(opts options, clientBuildFS fs.FS) {
 
 	err = setupConfig(opts)
 	fatalOnError(err)
+
+	// TODO(e.burkov):  This could be made earlier, probably as the option's
+	// effect.
+	cmdlineUpdate(opts)
 
 	if !Context.firstRun {
 		// Save the updated config
@@ -522,7 +511,7 @@ func run(opts options, clientBuildFS fs.FS) {
 	fatalOnError(err)
 
 	if !Context.firstRun {
-		err = initDNSServer()
+		err = initDNS()
 		fatalOnError(err)
 
 		Context.tls.start()
@@ -543,20 +532,24 @@ func run(opts options, clientBuildFS fs.FS) {
 		}
 	}
 
-	// TODO(a.garipov): This could be made much earlier and could be done on
-	// the first run as well, but to achieve this we need to bypass requests
-	// over dnsforward resolver.
-	cmdlineUpdate(opts)
-
 	Context.web.Start()
 
 	// wait indefinitely for other go-routines to complete their job
 	select {}
 }
 
+func (c *configuration) anonymizer() (ipmut *aghnet.IPMut) {
+	var anonFunc aghnet.IPMutFunc
+	if c.DNS.AnonymizeClientIP {
+		anonFunc = querylog.AnonymizeIP
+	}
+
+	return aghnet.NewIPMut(anonFunc)
+}
+
 // startMods initializes and starts the DNS server after installation.
-func startMods() error {
-	err := initDNSServer()
+func startMods() (err error) {
+	err = initDNS()
 	if err != nil {
 		return err
 	}
@@ -796,23 +789,12 @@ func loadCmdLineOpts() (opts options) {
 }
 
 // printWebAddrs prints addresses built from proto, addr, and an appropriate
-// port.  At least one address is printed with the value of port.  If the value
-// of betaPort is 0, the second address is not printed.  Output example:
+// port.  At least one address is printed with the value of port.  Output
+// example:
 //
-//	Go to http://127.0.0.1:80
-//	Go to http://127.0.0.1:3000 (BETA)
-func printWebAddrs(proto, addr string, port, betaPort int) {
-	const (
-		hostMsg     = "Go to %s://%s"
-		hostBetaMsg = hostMsg + " (BETA)"
-	)
-
-	log.Printf(hostMsg, proto, netutil.JoinHostPort(addr, port))
-	if betaPort == 0 {
-		return
-	}
-
-	log.Printf(hostBetaMsg, proto, netutil.JoinHostPort(addr, config.BetaBindPort))
+//	go to http://127.0.0.1:80
+func printWebAddrs(proto, addr string, port int) {
+	log.Printf("go to %s://%s", proto, netutil.JoinHostPort(addr, port))
 }
 
 // printHTTPAddresses prints the IP addresses which user can use to access the
@@ -830,14 +812,14 @@ func printHTTPAddresses(proto string) {
 
 	// TODO(e.burkov): Inspect and perhaps merge with the previous condition.
 	if proto == aghhttp.SchemeHTTPS && tlsConf.ServerName != "" {
-		printWebAddrs(proto, tlsConf.ServerName, tlsConf.PortHTTPS, 0)
+		printWebAddrs(proto, tlsConf.ServerName, tlsConf.PortHTTPS)
 
 		return
 	}
 
 	bindhost := config.BindHost
 	if !bindhost.IsUnspecified() {
-		printWebAddrs(proto, bindhost.String(), port, config.BetaBindPort)
+		printWebAddrs(proto, bindhost.String(), port)
 
 		return
 	}
@@ -848,14 +830,14 @@ func printHTTPAddresses(proto string) {
 		// That's weird, but we'll ignore it.
 		//
 		// TODO(e.burkov): Find out when it happens.
-		printWebAddrs(proto, bindhost.String(), port, config.BetaBindPort)
+		printWebAddrs(proto, bindhost.String(), port)
 
 		return
 	}
 
 	for _, iface := range ifaces {
 		for _, addr := range iface.Addresses {
-			printWebAddrs(proto, addr.String(), config.BindPort, config.BetaBindPort)
+			printWebAddrs(proto, addr.String(), config.BindPort)
 		}
 	}
 }
@@ -927,8 +909,8 @@ func getHTTPProxy(_ *http.Request) (*url.URL, error) {
 
 // jsonError is a generic JSON error response.
 //
-// TODO(a.garipov): Merge together with the implementations in .../dhcpd and
-// other packages after refactoring the web handler registering.
+// TODO(a.garipov): Merge together with the implementations in [dhcpd] and other
+// packages after refactoring the web handler registering.
 type jsonError struct {
 	// Message is the error message, an opaque string.
 	Message string `json:"message"`
@@ -940,30 +922,40 @@ func cmdlineUpdate(opts options) {
 		return
 	}
 
-	log.Info("starting update")
+	// Initialize the DNS server to use the internal resolver which the updater
+	// needs to be able to resolve the update source hostname.
+	//
+	// TODO(e.burkov):  We could probably initialize the internal resolver
+	// separately.
+	err := initDNSServer(nil, nil, nil, nil, nil, nil, &tlsConfigSettings{})
+	fatalOnError(err)
 
-	if Context.firstRun {
-		log.Info("update not allowed on first run")
+	log.Info("cmdline update: performing update")
 
-		os.Exit(0)
-	}
-
-	_, err := Context.updater.VersionInfo(true)
+	updater := Context.updater
+	info, err := updater.VersionInfo(true)
 	if err != nil {
-		vcu := Context.updater.VersionCheckURL()
+		vcu := updater.VersionCheckURL()
 		log.Error("getting version info from %s: %s", vcu, err)
 
-		os.Exit(0)
+		os.Exit(1)
 	}
 
-	if Context.updater.NewVersion() == "" {
+	if info.NewVersion == version.Version() {
 		log.Info("no updates available")
 
 		os.Exit(0)
 	}
 
-	err = Context.updater.Update()
+	err = updater.Update(Context.firstRun)
 	fatalOnError(err)
+
+	err = restartService()
+	if err != nil {
+		log.Debug("restarting service: %s", err)
+		log.Info("AdGuard Home was not installed as a service. " +
+			"Please restart running instances of AdGuardHome manually.")
+	}
 
 	os.Exit(0)
 }

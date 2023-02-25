@@ -2,10 +2,10 @@ package querylog
 
 import (
 	"io"
-	"sort"
 	"time"
 
 	"github.com/AdguardTeam/golibs/log"
+	"golang.org/x/exp/slices"
 )
 
 // client finds the client info, if any, by its ClientID and IP address,
@@ -98,8 +98,8 @@ func (l *queryLog) search(params *searchParams) (entries []*logEntry, oldest tim
 	// weird on the frontend.
 	//
 	// See https://github.com/AdguardTeam/AdGuardHome/issues/2293.
-	sort.SliceStable(entries, func(i, j int) (less bool) {
-		return entries[i].Time.After(entries[j].Time)
+	slices.SortStableFunc(entries, func(a, b *logEntry) (sortsBefore bool) {
+		return a.Time.After(b.Time)
 	})
 
 	if params.offset > 0 {
@@ -262,6 +262,10 @@ func (l *queryLog) readNextEntry(
 
 	e = &logEntry{}
 	decodeLogEntry(e, line)
+
+	if l.isIgnored(e.QHost) {
+		return nil, ts, nil
+	}
 
 	e.client, err = l.client(e.ClientID, e.IP.String(), cache)
 	if err != nil {
