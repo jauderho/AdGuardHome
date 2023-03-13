@@ -24,7 +24,7 @@ require (
 	// TODO(a.garipov): This package is deprecated; find a new one or use
 	// our own code for that.  Perhaps, use gopacket.
 	github.com/mdlayher/raw v0.1.0
-	github.com/miekg/dns v1.1.50
+	github.com/miekg/dns v1.1.52
 	github.com/quic-go/quic-go v0.32.0
 	github.com/stretchr/testify v1.8.1
 	github.com/ti-mo/netfilter v0.5.0
