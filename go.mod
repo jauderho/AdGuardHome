@@ -32,7 +32,7 @@ require (
 	golang.org/x/crypto v0.6.0
 	golang.org/x/exp v0.0.0-20230213192124-5e25df0256eb
 	golang.org/x/net v0.7.0
-	golang.org/x/sys v0.5.0
+	golang.org/x/sys v0.7.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 	howett.net/plist v1.0.0
