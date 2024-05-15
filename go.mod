@@ -29,7 +29,7 @@ require (
 	github.com/mdlayher/raw v0.1.0
 	github.com/miekg/dns v1.1.58
 	// TODO(a.garipov): Use release version.
-	github.com/quic-go/quic-go v0.42.1-0.20240424141022-12aa63824c7f
+	github.com/quic-go/quic-go v0.43.1
 	github.com/stretchr/testify v1.9.0
 	github.com/ti-mo/netfilter v0.5.1
 	go.etcd.io/bbolt v1.3.9
