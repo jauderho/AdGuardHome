@@ -8,7 +8,7 @@
 # Makefile.  Bump this number every time a significant change is made to
 # this Makefile.
 #
-# AdGuard-Project-Version: 2
+# AdGuard-Project-Version: 4
 
 # Don't name these macros "GO" etc., because GNU Make apparently makes
 # them exported environment variables with the literal value of
@@ -24,8 +24,10 @@ CHANNEL = development
 CLIENT_DIR = client
 COMMIT = $$( git rev-parse --short HEAD )
 DIST_DIR = dist
+GOAMD64 = v1
 GOPROXY = https://goproxy.cn|https://proxy.golang.org|direct
 GOSUMDB = sum.golang.google.cn
+GOTOOLCHAIN = go1.22.3
 GPG_KEY = devteam@adguard.com
 GPG_KEY_PASSPHRASE = not-a-real-password
 NPM = npm
@@ -55,14 +57,16 @@ BUILD_RELEASE_DEPS_0 = deps js-build
 BUILD_RELEASE_DEPS_1 = go-deps
 
 ENV = env\
-	COMMIT='$(COMMIT)'\
 	CHANNEL='$(CHANNEL)'\
-	GPG_KEY='$(GPG_KEY)'\
-	GPG_KEY_PASSPHRASE='$(GPG_KEY_PASSPHRASE)'\
+	COMMIT='$(COMMIT)'\
 	DIST_DIR='$(DIST_DIR)'\
 	GO="$(GO.MACRO)"\
+	GOAMD64="$(GOAMD64)"\
 	GOPROXY='$(GOPROXY)'\
 	GOSUMDB='$(GOSUMDB)'\
+	GOTOOLCHAIN='$(GOTOOLCHAIN)'\
+	GPG_KEY='$(GPG_KEY)'\
+	GPG_KEY_PASSPHRASE='$(GPG_KEY_PASSPHRASE)'\
 	PATH="$${PWD}/bin:$$( "$(GO.MACRO)" env GOPATH )/bin:$${PATH}"\
 	RACE='$(RACE)'\
 	SIGN='$(SIGN)'\
@@ -78,8 +82,6 @@ build: deps quick-build
 
 quick-build: js-build go-build
 
-ci: deps test
-
 deps: js-deps go-deps
 lint: js-lint go-lint
 test: js-test go-test
@@ -94,24 +96,23 @@ build-release: $(BUILD_RELEASE_DEPS_$(FRONTEND_PREBUILT))
 clean: ; $(ENV) "$(SHELL)" ./scripts/make/clean.sh
 init:  ; git config core.hooksPath ./scripts/hooks
 
-js-build:
-	$(NPM) $(NPM_FLAGS) run build-prod
-js-deps:
-	$(NPM) $(NPM_INSTALL_FLAGS) ci
+js-build: ; $(NPM) $(NPM_FLAGS) run build-prod
+js-deps:  ; $(NPM) $(NPM_INSTALL_FLAGS) ci
+js-lint:  ; $(NPM) $(NPM_FLAGS) run lint
+js-test:  ; $(NPM) $(NPM_FLAGS) run test
 
-# TODO(a.garipov): Remove the legacy client tasks support once the new
-# client is done and the old one is removed.
-js-lint: ; $(NPM) $(NPM_FLAGS) run lint
-js-test: ; $(NPM) $(NPM_FLAGS) run test
-
+go-bench: ; $(ENV) "$(SHELL)" ./scripts/make/go-bench.sh
 go-build: ; $(ENV) "$(SHELL)" ./scripts/make/go-build.sh
 go-deps:  ; $(ENV) "$(SHELL)" ./scripts/make/go-deps.sh
+go-fuzz:  ; $(ENV) "$(SHELL)" ./scripts/make/go-fuzz.sh
 go-lint:  ; $(ENV) "$(SHELL)" ./scripts/make/go-lint.sh
 go-tools: ; $(ENV) "$(SHELL)" ./scripts/make/go-tools.sh
 
 # TODO(a.garipov): Think about making RACE='1' the default for all
 # targets.
 go-test:  ; $(ENV) RACE='1' "$(SHELL)" ./scripts/make/go-test.sh
+
+go-upd-tools: ; $(ENV) "$(SHELL)" ./scripts/make/go-upd-tools.sh
 
 go-check: go-tools go-lint go-test
 

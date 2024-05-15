@@ -3,7 +3,7 @@
 # This comment is used to simplify checking local copies of the script.  Bump
 # this number every time a significant change is made to this script.
 #
-# AdGuard-Project-Version: 3
+# AdGuard-Project-Version: 5
 
 verbose="${VERBOSE:-0}"
 readonly verbose
@@ -30,33 +30,6 @@ set -f -u
 
 
 
-# Warnings
-
-go_version="$( "${GO:-go}" version )"
-readonly go_version
-
-go_min_version='go1.19.6'
-go_version_msg="
-warning: your go version (${go_version}) is different from the recommended minimal one (${go_min_version}).
-if you have the version installed, please set the GO environment variable.
-for example:
-
-	export GO='${go_min_version}'
-"
-readonly go_min_version go_version_msg
-
-case "$go_version"
-in
-('go version'*"$go_min_version"*)
-	# Go on.
-	;;
-(*)
-	echo "$go_version_msg" 1>&2
-	;;
-esac
-
-
-
 # Simple analyzers
 
 # blocklist_imports is a simple check against unwanted packages.  The following
@@ -74,12 +47,22 @@ esac
 #
 #      See https://github.com/golang/go/issues/45200.
 #
-#   *  Package sort is replaced by golang.org/x/exp/slices.
+#   *  Package sort is replaced by package slices.
 #
 #   *  Package unsafe is… unsafe.
 #
+#   *  Package golang.org/x/exp/slices has been moved into stdlib.
+#
 #   *  Package golang.org/x/net/context has been moved into stdlib.
 #
+# Currently, the only standard exception are files generated from protobuf
+# schemas, which use package reflect.  If your project needs more exceptions,
+# add and document them.
+#
+# TODO(a.garipov): Add golibs/log.
+#
+# TODO(a.garipov): Add deprecated package golang.org/x/exp/maps once all
+# projects switch to Go 1.22.
 blocklist_imports() {
 	git grep\
 		-e '[[:space:]]"errors"$'\
@@ -88,9 +71,11 @@ blocklist_imports() {
 		-e '[[:space:]]"reflect"$'\
 		-e '[[:space:]]"sort"$'\
 		-e '[[:space:]]"unsafe"$'\
+		-e '[[:space:]]"golang.org/x/exp/slices"$'\
 		-e '[[:space:]]"golang.org/x/net/context"$'\
 		-n\
 		-- '*.go'\
+		':!*.pb.go'\
 		| sed -e 's/^\([^[:space:]]\+\)\(.*\)$/\1 blocked import:\2/'\
 		|| exit 0
 }
@@ -101,6 +86,7 @@ method_const() {
 	git grep -F\
 		-e '"DELETE"'\
 		-e '"GET"'\
+		-e '"PATCH"'\
 		-e '"POST"'\
 		-e '"PUT"'\
 		-n\
@@ -116,18 +102,16 @@ underscores() {
 	underscore_files="$(
 		git ls-files '*_*.go'\
 			| grep -F\
-			-e '_big.go'\
 			-e '_bsd.go'\
 			-e '_darwin.go'\
 			-e '_freebsd.go'\
 			-e '_linux.go'\
-			-e '_little.go'\
 			-e '_next.go'\
 			-e '_openbsd.go'\
 			-e '_others.go'\
 			-e '_test.go'\
 			-e '_unix.go'\
-			-e '_windows.go' \
+			-e '_windows.go'\
 			-v\
 			| sed -e 's/./\t\0/'
 	)"
@@ -160,51 +144,145 @@ run_linter "$GO" vet ./...
 
 run_linter govulncheck ./...
 
-# Apply more lax standards to the code we haven't properly refactored yet.
-run_linter gocyclo --over 17 ./internal/querylog/
-run_linter gocyclo --over 13\
-	./internal/dhcpd\
-	./internal/filtering/\
+run_linter gocyclo --over 10 .
+
+# TODO(a.garipov): Enable 10 for all.
+run_linter gocognit --over='20'\
+	./internal/querylog/\
+	;
+
+run_linter gocognit --over='19'\
 	./internal/home/\
 	;
 
-# Apply the normal standards to new or somewhat refactored code.
-run_linter gocyclo --over 10\
-	./internal/aghio/\
-	./internal/aghnet/\
+run_linter gocognit --over='18'\
+	./internal/aghtls/\
+	;
+
+run_linter gocognit --over='15'\
 	./internal/aghos/\
-	./internal/aghtest/\
-	./internal/dnsforward/\
+	./internal/filtering/\
+	;
+
+run_linter gocognit --over='14'\
+	./internal/dhcpd\
+	;
+
+run_linter gocognit --over='13'\
+	./internal/aghnet/\
+	;
+
+run_linter gocognit --over='12'\
 	./internal/filtering/rewrite/\
+	;
+
+run_linter gocognit --over='11'\
+	./internal/updater/\
+	;
+
+run_linter gocognit --over='10'\
+	./internal/aghalg/\
+	./internal/aghhttp/\
+	./internal/aghrenameio/\
+	./internal/aghtest/\
+	./internal/arpdb/\
+	./internal/client/\
+	./internal/configmigrate/\
+	./internal/dhcpsvc\
+	./internal/dnsforward/\
+	./internal/filtering/hashprefix/\
+	./internal/filtering/rulelist/\
+	./internal/filtering/safesearch/\
+	./internal/ipset\
+	./internal/next/\
+	./internal/rdns/\
+	./internal/schedule/\
 	./internal/stats/\
 	./internal/tools/\
-	./internal/updater/\
-	./internal/next/\
 	./internal/version/\
-	./scripts/blocked-services/\
-	./scripts/vetted-filters/\
-	./main.go\
+	./internal/whois/\
+	./scripts/\
 	;
 
 run_linter ineffassign ./...
 
 run_linter unparam ./...
 
-git ls-files -- 'Makefile' '*.go' '*.mod' '*.sh' '*.yaml' '*.yml'\
-	| xargs misspell --error
+git ls-files -- 'Makefile' '*.conf' '*.go' '*.mod' '*.sh' '*.yaml' '*.yml'\
+	| xargs misspell --error\
+	| sed -e 's/^/misspell: /'
 
 run_linter looppointer ./...
 
 run_linter nilness ./...
 
-# TODO(a.garipov): Add fieldalignment?
+# TODO(a.garipov): Enable for all.
+run_linter fieldalignment \
+	./internal/aghalg/\
+	./internal/aghhttp/\
+	./internal/aghos/\
+	./internal/aghrenameio/\
+	./internal/aghtest/\
+	./internal/aghtls/\
+	./internal/arpdb/\
+	./internal/client/\
+	./internal/configmigrate/\
+	./internal/dhcpsvc/\
+	./internal/filtering/hashprefix/\
+	./internal/filtering/rewrite/\
+	./internal/filtering/rulelist/\
+	./internal/filtering/safesearch/\
+	./internal/ipset/\
+	./internal/next/...\
+	./internal/querylog/\
+	./internal/rdns/\
+	./internal/schedule/\
+	./internal/stats/\
+	./internal/updater/\
+	./internal/version/\
+	./internal/whois/\
+	;
 
 run_linter -e shadow --strict ./...
 
-# TODO(a.garipov): Enable in v0.108.0.
-# run_linter gosec --quiet ./...
+# TODO(a.garipov): Enable for all.
+run_linter gosec --quiet\
+	./internal/aghalg/\
+	./internal/aghchan/\
+	./internal/aghhttp/\
+	./internal/aghnet/\
+	./internal/aghos/\
+	./internal/aghrenameio/\
+	./internal/aghtest/\
+	./internal/arpdb/\
+	./internal/client/\
+	./internal/configmigrate/\
+	./internal/dhcpd/\
+	./internal/dhcpsvc/\
+	./internal/dnsforward/\
+	./internal/filtering/hashprefix/\
+	./internal/filtering/rewrite/\
+	./internal/filtering/rulelist/\
+	./internal/filtering/safesearch/\
+	./internal/ipset/\
+	./internal/next/\
+	./internal/rdns/\
+	./internal/schedule/\
+	./internal/stats/\
+	./internal/tools/\
+	./internal/version/\
+	./internal/whois/\
+	;
 
-# TODO(a.garipov): Enable --blank?
-run_linter errcheck --asserts ./...
+run_linter errcheck ./...
 
-run_linter staticcheck ./...
+staticcheck_matrix='
+darwin:  GOOS=darwin
+freebsd: GOOS=freebsd
+linux:   GOOS=linux
+openbsd: GOOS=openbsd
+windows: GOOS=windows
+'
+readonly staticcheck_matrix
+
+echo "$staticcheck_matrix" | run_linter staticcheck --matrix ./...
