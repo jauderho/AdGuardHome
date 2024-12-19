@@ -103,20 +103,18 @@ func newPrivateConfig(
 		}
 	}
 
-	log.Debug("dnsforward: upstreams to resolve ptr for local addresses: %v", addrs)
+	log.Debug("dnsforward: private-use upstreams: %v", addrs)
 
 	uc, err = proxy.ParseUpstreamsConfig(addrs, opts)
 	if err != nil {
 		return uc, fmt.Errorf("preparing private upstreams: %w", err)
 	}
 
-	if !confNeedsFiltering {
-		return uc, nil
-	}
-
-	err = filterOutAddrs(uc, unwanted)
-	if err != nil {
-		return uc, fmt.Errorf("filtering private upstreams: %w", err)
+	if confNeedsFiltering {
+		err = filterOutAddrs(uc, unwanted)
+		if err != nil {
+			return uc, fmt.Errorf("filtering private upstreams: %w", err)
+		}
 	}
 
 	// Prevalidate the config to catch the exact error before creating proxy.
@@ -152,12 +150,12 @@ func setProxyUpstreamMode(
 ) (err error) {
 	switch upstreamMode {
 	case UpstreamModeParallel:
-		conf.UpstreamMode = proxy.UModeParallel
+		conf.UpstreamMode = proxy.UpstreamModeParallel
 	case UpstreamModeFastestAddr:
-		conf.UpstreamMode = proxy.UModeFastestAddr
+		conf.UpstreamMode = proxy.UpstreamModeFastestAddr
 		conf.FastestPingTimeout = fastestTimeout
 	case UpstreamModeLoadBalance:
-		conf.UpstreamMode = proxy.UModeLoadBalance
+		conf.UpstreamMode = proxy.UpstreamModeLoadBalance
 	default:
 		return fmt.Errorf("unexpected value %q", upstreamMode)
 	}
